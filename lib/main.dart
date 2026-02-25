@@ -3,7 +3,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:js' as js;
+import 'dart:ui' as ui;
 
 void main() {
   runApp(const MyApp());
@@ -16,10 +18,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Territory Capture Game',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
-        useMaterial3: true,
-      ),
+      theme: ThemeData.dark(useMaterial3: true),
       home: const MapScreen(),
     );
   }
@@ -40,23 +39,263 @@ class _MapScreenState extends State<MapScreen> {
   bool locationDenied = false;
   bool isLoading = true;
 
-  // H3 Game State - Track all captured zones
+  // ============================================
+  // H3 GAME STATE - Track all captured zones
+  // ============================================
   Set<String> capturedZones = {};
   Map<String, List<LatLng>> zoneBoundaries = {};
+
+  // ============================================
+  // GAMIFICATION - Scoring System
+  // ============================================
+  int userScore = 0;
+  static const int pointsPerZone = 100;
+
+  // ============================================
+  // PERSISTENCE - Shared Preferences
+  // ============================================
+  late SharedPreferences _prefs;
+  static const String _capturedZonesKey = 'capturedZones';
+  static const String _userScoreKey = 'userScore';
 
   @override
   void initState() {
     super.initState();
     mapController = MapController();
-    _requestLocationPermission();
+    _initializeAppStrict();
   }
 
-  /// Waits for H3 library to load, then calculates the hexagon
+  /// ============================================================
+  /// BULLETPROOF INITIALIZATION - Strict Order to Fix Race Condition
+  /// ============================================================
+  /// This follows a STRICT initialization sequence:
+  /// 1. Set loading state
+  /// 2. Load SharedPreferences
+  /// 3. Load saved zones and score from storage
+  /// 4. Wait for H3 JS library to be ready (retry loop 5 seconds)
+  /// 5. Calculate boundaries for ALL saved zones
+  /// 6. Request location permission and get initial GPS position
+  /// 7. ONLY AFTER ALL ABOVE, set isLoading = false so map renders
+  /// ============================================================
+  Future<void> _initializeAppStrict() async {
+    try {
+      debugPrint('🚀 APP INITIALIZATION STARTING...');
+
+      // STEP 1: Set loading state
+      setState(() {
+        isLoading = true;
+      });
+
+      // STEP 2: Load SharedPreferences
+      debugPrint('⏳ [STEP 2] Loading SharedPreferences...');
+      _prefs = await SharedPreferences.getInstance();
+      debugPrint('✅ [STEP 2] SharedPreferences loaded');
+
+      // STEP 3: Load saved zones and score from storage
+      debugPrint('⏳ [STEP 3] Loading saved data from storage...');
+      await _loadSavedDataFromStorage();
+      debugPrint(
+        '✅ [STEP 3] Loaded ${capturedZones.length} zones, Score: $userScore',
+      );
+
+      // STEP 4 & 5: Wait for H3 library and calculate boundaries
+      debugPrint('⏳ [STEP 4-5] Waiting for H3 JS library...');
+      await _waitForH3LibraryAndCalculateBoundaries();
+      debugPrint('✅ [STEP 4-5] H3 library ready, boundaries calculated');
+
+      // STEP 6: Request location permission and get initial position
+      debugPrint('⏳ [STEP 6] Requesting location permission...');
+      await _requestLocationPermissionStrict();
+      debugPrint('✅ [STEP 6] Location permission complete');
+
+      // STEP 7: ONLY NOW set isLoading = false so the map renders
+      // This ensures all zones are already calculated and in memory
+      debugPrint('⏳ [STEP 7] Setting isLoading = false...');
+      setState(() {
+        isLoading = false;
+      });
+      debugPrint('🎉 [STEP 7] Map is now ready to render with all zones!');
+
+      debugPrint('✅ APP INITIALIZATION COMPLETE');
+    } catch (e) {
+      debugPrint('❌ CRITICAL ERROR during app initialization: $e');
+      setState(() {
+        isLoading = false;
+      });
+    }
+  }
+
+  /// Load saved zones and user score from SharedPreferences storage
+  Future<void> _loadSavedDataFromStorage() async {
+    try {
+      final savedZones = _prefs.getStringList(_capturedZonesKey) ?? [];
+      final savedScore = _prefs.getInt(_userScoreKey) ?? 0;
+
+      if (savedZones.isEmpty) {
+        debugPrint('📦 No saved zones found in storage (fresh start)');
+        userScore = 0;
+        return;
+      }
+
+      debugPrint('📦 Found ${savedZones.length} saved zones in storage');
+      debugPrint('💰 Loaded saved score: $savedScore points');
+
+      // Add zones to the Set (without calculating boundaries yet)
+      capturedZones.addAll(savedZones);
+      userScore = savedScore;
+    } catch (e) {
+      debugPrint('❌ Error loading saved data: $e');
+    }
+  }
+
+  /// Wait for H3 JS library to be ready, then calculate boundaries for all saved zones
+  /// This is called BEFORE the map renders
+  Future<void> _waitForH3LibraryAndCalculateBoundaries() async {
+    if (capturedZones.isEmpty) {
+      debugPrint('📦 No zones to restore, skipping H3 calculation');
+      return;
+    }
+
+    debugPrint('⏳ Waiting for H3 JS library to load...');
+
+    // Retry loop: wait up to 5 seconds for H3 library
+    int attempts = 0;
+    dynamic h3Lib;
+    const maxAttempts = 50; // 50 * 100ms = 5 seconds
+
+    while (attempts < maxAttempts) {
+      h3Lib = js.context['h3'];
+      if (h3Lib != null) {
+        debugPrint('✅ JS Library Ready (attempt ${attempts + 1})');
+        break;
+      }
+      await Future.delayed(const Duration(milliseconds: 100));
+      attempts++;
+    }
+
+    if (h3Lib == null) {
+      debugPrint(
+        '❌ FATAL: H3 library failed to load after ${attempts * 100}ms',
+      );
+      debugPrint('   Make sure web/index.html has:');
+      debugPrint(
+        '   <script src="https://cdn.jsdelivr.net/npm/h3-js@4.1.0/dist/h3.umd.js"></script>',
+      );
+      return;
+    }
+
+    // Calculate boundaries for ALL saved zones BEFORE map renders
+    debugPrint(
+      '📐 Calculating boundaries for ${capturedZones.length} zones...',
+    );
+    for (final h3Index in capturedZones) {
+      _calculateZoneBoundary(h3Lib, h3Index);
+    }
+    debugPrint('✅ All boundaries calculated');
+  }
+
+  /// Calculate the boundary for a single zone from its H3 index
+  void _calculateZoneBoundary(dynamic h3Lib, String h3Index) {
+    try {
+      if (zoneBoundaries.containsKey(h3Index)) {
+        return; // Already calculated
+      }
+
+      final jsBoundary = h3Lib.callMethod('cellToBoundary', [h3Index]);
+
+      if (jsBoundary == null) {
+        debugPrint('⚠️  cellToBoundary returned null for: $h3Index');
+        return;
+      }
+
+      final boundaryLength = jsBoundary['length'] as int;
+      final List<LatLng> newBoundary = [];
+
+      for (int i = 0; i < boundaryLength; i++) {
+        final coord = jsBoundary[i];
+        final lat = (coord[0] as num).toDouble();
+        final lng = (coord[1] as num).toDouble();
+        newBoundary.add(LatLng(lat, lng));
+      }
+
+      zoneBoundaries[h3Index] = newBoundary;
+      debugPrint('✅ Boundary calculated for zone: $h3Index');
+    } catch (e) {
+      debugPrint('❌ Error calculating boundary for $h3Index: $e');
+    }
+  }
+
+  /// Request location permission strictly
+  Future<void> _requestLocationPermissionStrict() async {
+    try {
+      debugPrint('🔐 Checking location permission status...');
+      LocationPermission permission = await Geolocator.checkPermission();
+
+      if (permission == LocationPermission.denied) {
+        debugPrint('📍 Permission denied, requesting from user...');
+        permission = await Geolocator.requestPermission();
+      }
+
+      if (permission == LocationPermission.deniedForever) {
+        debugPrint('❌ Location permission permanently denied');
+        setState(() {
+          locationDenied = true;
+        });
+        return;
+      }
+
+      if (permission == LocationPermission.whileInUse ||
+          permission == LocationPermission.always) {
+        debugPrint('✅ Location permission granted');
+
+        try {
+          debugPrint('⏳ Fetching initial GPS position...');
+          final position = await Geolocator.getCurrentPosition(
+            desiredAccuracy: LocationAccuracy.best,
+          );
+          final loc = LatLng(position.latitude, position.longitude);
+
+          debugPrint(
+            '📍 Initial GPS position: ${position.latitude}, ${position.longitude}',
+          );
+
+          setState(() {
+            userLocation = loc;
+          });
+
+          // Capture initial hexagon if not already captured
+          await _calculateH3(loc);
+
+          // Start live GPS tracking
+          _startGPSTracking();
+        } catch (e) {
+          debugPrint('⚠️  Could not get initial position: $e');
+          debugPrint('🗺️  Using default Kathmandu location');
+          setState(() {
+            userLocation = kathmandu;
+          });
+          _startGPSTracking();
+        }
+      } else {
+        debugPrint('⚠️  Location permission not granted (status: $permission)');
+        setState(() {
+          locationDenied = true;
+        });
+      }
+    } catch (e) {
+      debugPrint('❌ Error requesting location permission: $e');
+      setState(() {
+        locationDenied = true;
+      });
+    }
+  }
+
+  /// Wait for H3 library, then calculate and add a new hexagon
   Future<void> _calculateH3(LatLng location) async {
     try {
-      // Wait up to 5 seconds for the H3 library to load
+      // Wait up to 5 seconds for H3 library
       int attempts = 0;
-      const maxAttempts = 50; // 50 * 100ms = 5 seconds max
+      const maxAttempts = 50;
 
       while (attempts < maxAttempts) {
         final h3Lib = js.context['h3'];
@@ -67,34 +306,28 @@ class _MapScreenState extends State<MapScreen> {
           return;
         }
 
-        // Library not loaded yet, wait 100ms and retry
         await Future.delayed(const Duration(milliseconds: 100));
         attempts++;
       }
 
       debugPrint('❌ ERROR: H3 JS library failed to load after 5 seconds!');
-      debugPrint('   Make sure this script is in web/index.html:');
-      debugPrint(
-        '   <script src=\"https://cdn.jsdelivr.net/npm/h3-js@4.1.0/dist/h3.umd.js\"></script>',
-      );
     } catch (e) {
-      debugPrint('ERROR in _calculateH3: $e');
+      debugPrint('❌ Error in _calculateH3: $e');
     }
   }
 
-  /// Process the H3 calculation once library is confirmed loaded
-  /// Adds to the captured zones instead of overwriting
+  /// Process H3 calculation: convert location to hexagon and add to map
   void _processH3Calculation(dynamic h3Lib, LatLng location) {
     try {
       debugPrint(
         '📍 Converting Lat/Lng (${location.latitude}, ${location.longitude}) to H3 Index...',
       );
 
-      // 1. Convert Lat/Lng to H3 Index at Resolution 10
+      // Convert Lat/Lng to H3 Index at Resolution 10 (~50m hexagons)
       final h3Index = h3Lib.callMethod('latLngToCell', [
         location.latitude,
         location.longitude,
-        10, // Resolution 10 = ~50m hexagons
+        10,
       ]);
 
       debugPrint('✅ H3 Index calculated: $h3Index');
@@ -112,7 +345,7 @@ class _MapScreenState extends State<MapScreen> {
         return;
       }
 
-      // 2. Get the 6 corners of the hexagon polygon
+      // Get the 6 corners of the hexagon polygon
       final jsBoundary = h3Lib.callMethod('cellToBoundary', [h3Index]);
 
       if (jsBoundary == null) {
@@ -125,7 +358,6 @@ class _MapScreenState extends State<MapScreen> {
 
       final List<LatLng> newBoundary = [];
 
-      // Loop through the JavaScript array of [lat, lng] pairs
       for (int i = 0; i < boundaryLength; i++) {
         final coord = jsBoundary[i];
         final lat = (coord[0] as num).toDouble();
@@ -138,17 +370,36 @@ class _MapScreenState extends State<MapScreen> {
         '✅ Successfully created hexagon with ${newBoundary.length} points',
       );
 
-      // 3. ADD to the captured zones collection (not replace)
+      // Add to captured zones and calculate boundaries
       setState(() {
         capturedZones.add(h3IndexStr);
         zoneBoundaries[h3IndexStr] = newBoundary;
+        // GAMIFICATION: Add points for new zone
+        userScore += pointsPerZone;
       });
+
+      // Save to local storage
+      _saveCapturedZonesAndScore();
 
       debugPrint(
         '🎨 Zone added to trail! Total zones: ${capturedZones.length}',
       );
+      debugPrint('💰 Score increased by $pointsPerZone! Total: $userScore');
     } catch (e) {
       debugPrint('❌ ERROR calculating H3 hexagon: $e');
+    }
+  }
+
+  /// Save captured zones and score to SharedPreferences
+  Future<void> _saveCapturedZonesAndScore() async {
+    try {
+      await _prefs.setStringList(_capturedZonesKey, capturedZones.toList());
+      await _prefs.setInt(_userScoreKey, userScore);
+      debugPrint(
+        '💾 Saved ${capturedZones.length} zones and score ($userScore points) to storage',
+      );
+    } catch (e) {
+      debugPrint('❌ Error saving data: $e');
     }
   }
 
@@ -158,55 +409,48 @@ class _MapScreenState extends State<MapScreen> {
       '🎮 DEV MODE: Tapped at ${tappedLocation.latitude}, ${tappedLocation.longitude}',
     );
 
-    // Update user location to tapped position
     setState(() {
       userLocation = tappedLocation;
     });
 
-    // Calculate and add the hexagon at the new location
     await _calculateH3(tappedLocation);
   }
 
-  Future<void> _requestLocationPermission() async {
+  /// Start listening to GPS position stream for live tracking
+  Future<void> _startGPSTracking() async {
     try {
-      LocationPermission permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-      }
+      debugPrint('🛰️  Starting live GPS tracking with 7m distance filter...');
 
-      if (permission == LocationPermission.deniedForever) {
-        setState(() {
-          locationDenied = true;
-          isLoading = false;
-        });
-        return;
-      }
+      const LocationSettings locationSettings = LocationSettings(
+        accuracy: LocationAccuracy.best,
+        distanceFilter: 7,
+        timeLimit: Duration(seconds: 10),
+      );
 
-      if (permission == LocationPermission.whileInUse ||
-          permission == LocationPermission.always) {
-        final position = await Geolocator.getCurrentPosition(
-          desiredAccuracy: LocationAccuracy.best,
-        );
-        final loc = LatLng(position.latitude, position.longitude);
+      final positionStream = Geolocator.getPositionStream(
+        locationSettings: locationSettings,
+      );
 
-        setState(() {
-          userLocation = loc;
-          isLoading = false;
-        });
+      positionStream.listen(
+        (Position position) {
+          final newLocation = LatLng(position.latitude, position.longitude);
 
-        // Calculate the hexagon for where the user is standing!
-        await _calculateH3(loc);
-      } else {
-        setState(() {
-          locationDenied = true;
-          isLoading = false;
-        });
-      }
+          debugPrint(
+            '📍 GPS Update: ${position.latitude}, ${position.longitude}',
+          );
+
+          setState(() {
+            userLocation = newLocation;
+          });
+
+          _calculateH3(newLocation);
+        },
+        onError: (dynamic error) {
+          debugPrint('❌ GPS Stream Error: $error');
+        },
+      );
     } catch (e) {
-      setState(() {
-        locationDenied = true;
-        isLoading = false;
-      });
+      debugPrint('❌ Error starting GPS tracking: $e');
     }
   }
 
@@ -214,32 +458,55 @@ class _MapScreenState extends State<MapScreen> {
   Widget build(BuildContext context) {
     if (isLoading) {
       return Scaffold(
-        appBar: AppBar(title: const Text('Loading Map...'), centerTitle: true),
-        body: const Center(child: CircularProgressIndicator()),
+        body: Center(
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const CircularProgressIndicator(
+                color: Color(0xFF00D9FF), // Neon cyan
+              ),
+              const SizedBox(height: 24),
+              const Text(
+                'INITIALIZING...',
+                style: TextStyle(
+                  color: Color(0xFF00D9FF),
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 2.0,
+                ),
+              ),
+            ],
+          ),
+        ),
       );
     }
 
     if (locationDenied) {
       return Scaffold(
-        appBar: AppBar(
-          title: const Text('Territory Capture Game'),
-          centerTitle: true,
-        ),
         body: Center(
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const Icon(Icons.location_off, size: 64, color: Colors.red),
+              const Icon(
+                Icons.location_off,
+                size: 64,
+                color: Color(0xFF00D9FF),
+              ),
               const SizedBox(height: 16),
               const Text(
-                'Location permission is required to play.',
-                style: TextStyle(fontSize: 18),
-                textAlign: TextAlign.center,
+                'Location permission required',
+                style: TextStyle(color: Color(0xFF00D9FF), fontSize: 18),
               ),
               const SizedBox(height: 24),
               ElevatedButton(
-                onPressed: _requestLocationPermission,
-                child: const Text('Retry'),
+                onPressed: _requestLocationPermissionStrict,
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF00D9FF),
+                ),
+                child: const Text(
+                  'ENABLE LOCATION',
+                  style: TextStyle(color: Colors.black),
+                ),
               ),
             ],
           ),
@@ -248,65 +515,157 @@ class _MapScreenState extends State<MapScreen> {
     }
 
     return Scaffold(
-      appBar: AppBar(
-        // Show the count of captured zones
-        title: Text('Territory Captured: ${capturedZones.length} zones'),
-        centerTitle: true,
-        elevation: 0,
-      ),
-      body: FlutterMap(
-        mapController: mapController,
-        options: MapOptions(
-          initialCenter: userLocation ?? kathmandu,
-          initialZoom: 17.0, // Zoomed in closer so we can see the hexagons
-          minZoom: 5.0,
-          maxZoom: 18.0,
-          // DEV MODE: Tap map to simulate walking and capturing zones
-          onTap: _onMapTap,
-        ),
+      body: Stack(
         children: [
-          TileLayer(
-            urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-            userAgentPackageName: 'com.example.app',
+          // ============================================
+          // MAP LAYER - Dark CartoDB tiles with neon hexagons
+          // ============================================
+          FlutterMap(
+            mapController: mapController,
+            options: MapOptions(
+              initialCenter: userLocation ?? kathmandu,
+              initialZoom: 17.0,
+              minZoom: 5.0,
+              maxZoom: 18.0,
+              onTap: _onMapTap,
+            ),
+            children: [
+              // Dark CartoDB tiles
+              TileLayer(
+                urlTemplate:
+                    'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png',
+                subdomains: const ['a', 'b', 'c', 'd'],
+                userAgentPackageName: 'com.example.app',
+              ),
+
+              // Neon glow hexagons
+              if (zoneBoundaries.isNotEmpty)
+                PolygonLayer(
+                  polygons: [
+                    for (final entry in zoneBoundaries.entries)
+                      Polygon(
+                        points: entry.value,
+                        color: const Color(0xFF00D9FF).withValues(alpha: 0.2),
+                        borderColor: const Color(0xFF00D9FF),
+                        borderStrokeWidth: 3.0,
+                      ),
+                  ],
+                ),
+
+              // User location marker
+              MarkerLayer(
+                markers: [
+                  if (userLocation != null)
+                    Marker(
+                      point: userLocation!,
+                      width: 80,
+                      height: 80,
+                      child: Container(
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF00D9FF).withValues(alpha: 0.3),
+                          shape: BoxShape.circle,
+                          border: Border.all(
+                            color: const Color(0xFF00D9FF),
+                            width: 2,
+                          ),
+                        ),
+                        child: const Icon(
+                          Icons.my_location,
+                          color: Color(0xFF00D9FF),
+                          size: 24,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ],
           ),
 
-          // Draw all captured hexagons
-          if (zoneBoundaries.isNotEmpty)
-            PolygonLayer(
-              polygons: [
-                // Create a polygon for each captured zone
-                for (final entry in zoneBoundaries.entries)
-                  Polygon(
-                    points: entry.value,
-                    color: Colors.green.withValues(alpha: 0.3),
-                    borderColor: Colors.green,
-                    borderStrokeWidth: 2.0,
-                  ),
-              ],
-            ),
-
-          // Draw the User Location Layer
-          MarkerLayer(
-            markers: [
-              if (userLocation != null)
-                Marker(
-                  point: userLocation!,
-                  width: 80,
-                  height: 80,
+          // ============================================
+          // HUD LAYER - Cyberpunk heads-up display
+          // ============================================
+          SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: BackdropFilter(
+                  filter: ui.ImageFilter.blur(sigmaX: 10, sigmaY: 10),
                   child: Container(
-                    decoration: BoxDecoration(
-                      color: Colors.blue.withValues(alpha: 0.3),
-                      shape: BoxShape.circle,
-                      border: Border.all(color: Colors.blue, width: 2),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 20,
+                      vertical: 16,
                     ),
-                    child: const Icon(
-                      Icons.my_location,
-                      color: Colors.blue,
-                      size: 24,
+                    decoration: BoxDecoration(
+                      color: Colors.black.withValues(alpha: 0.6),
+                      border: Border.all(
+                        color: const Color(0xFF00D9FF),
+                        width: 2,
+                      ),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // Score display
+                        Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'SCORE',
+                              style: TextStyle(
+                                color: Color(0xFF00FF41),
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                                letterSpacing: 1.5,
+                              ),
+                            ),
+                            Text(
+                              userScore.toString().padLeft(5, '0'),
+                              style: const TextStyle(
+                                color: Color(0xFF00FF41),
+                                fontSize: 24,
+                                fontWeight: FontWeight.bold,
+                                fontFamily: 'Courier',
+                                letterSpacing: 1.0,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(width: 32),
+                        // Zones display
+                        Column(
+                          mainAxisSize: MainAxisSize.min,
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'ZONES',
+                              style: TextStyle(
+                                color: Color(0xFF00D9FF),
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                                letterSpacing: 1.5,
+                              ),
+                            ),
+                            Text(
+                              capturedZones.length.toString().padLeft(3, '0'),
+                              style: const TextStyle(
+                                color: Color(0xFF00D9FF),
+                                fontSize: 24,
+                                fontWeight: FontWeight.bold,
+                                fontFamily: 'Courier',
+                                letterSpacing: 1.0,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
                     ),
                   ),
                 ),
-            ],
+              ),
+            ),
           ),
         ],
       ),
