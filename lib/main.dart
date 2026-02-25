@@ -40,9 +40,9 @@ class _MapScreenState extends State<MapScreen> {
   bool locationDenied = false;
   bool isLoading = true;
 
-  // H3 Game State
-  String? currentH3Index;
-  List<LatLng> hexagonBoundary = [];
+  // H3 Game State - Track all captured zones
+  Set<String> capturedZones = {};
+  Map<String, List<LatLng>> zoneBoundaries = {};
 
   @override
   void initState() {
@@ -83,6 +83,7 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   /// Process the H3 calculation once library is confirmed loaded
+  /// Adds to the captured zones instead of overwriting
   void _processH3Calculation(dynamic h3Lib, LatLng location) {
     try {
       debugPrint(
@@ -100,6 +101,14 @@ class _MapScreenState extends State<MapScreen> {
 
       if (h3Index == null || h3Index.toString().isEmpty) {
         debugPrint('❌ ERROR: H3 Index is null or empty');
+        return;
+      }
+
+      final h3IndexStr = h3Index.toString();
+
+      // Check if we've already captured this zone
+      if (capturedZones.contains(h3IndexStr)) {
+        debugPrint('⚠️  Zone $h3IndexStr already captured!');
         return;
       }
 
@@ -129,16 +138,33 @@ class _MapScreenState extends State<MapScreen> {
         '✅ Successfully created hexagon with ${newBoundary.length} points',
       );
 
-      // 3. Update the UI with the hexagon data
+      // 3. ADD to the captured zones collection (not replace)
       setState(() {
-        currentH3Index = h3Index.toString();
-        hexagonBoundary = newBoundary;
+        capturedZones.add(h3IndexStr);
+        zoneBoundaries[h3IndexStr] = newBoundary;
       });
 
-      debugPrint('🎨 Hexagon rendered on map!');
+      debugPrint(
+        '🎨 Zone added to trail! Total zones: ${capturedZones.length}',
+      );
     } catch (e) {
       debugPrint('❌ ERROR calculating H3 hexagon: $e');
     }
+  }
+
+  /// Handle map tap for dev mode teleportation
+  Future<void> _onMapTap(TapPosition tapPosition, LatLng tappedLocation) async {
+    debugPrint(
+      '🎮 DEV MODE: Tapped at ${tappedLocation.latitude}, ${tappedLocation.longitude}',
+    );
+
+    // Update user location to tapped position
+    setState(() {
+      userLocation = tappedLocation;
+    });
+
+    // Calculate and add the hexagon at the new location
+    await _calculateH3(tappedLocation);
   }
 
   Future<void> _requestLocationPermission() async {
@@ -223,12 +249,8 @@ class _MapScreenState extends State<MapScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        // Show the Hexagon ID at the top of the screen!
-        title: Text(
-          currentH3Index != null
-              ? 'Zone: $currentH3Index'
-              : 'Territory Capture',
-        ),
+        // Show the count of captured zones
+        title: Text('Territory Captured: ${capturedZones.length} zones'),
         centerTitle: true,
         elevation: 0,
       ),
@@ -236,9 +258,11 @@ class _MapScreenState extends State<MapScreen> {
         mapController: mapController,
         options: MapOptions(
           initialCenter: userLocation ?? kathmandu,
-          initialZoom: 17.0, // Zoomed in closer so we can see the hexagon
+          initialZoom: 17.0, // Zoomed in closer so we can see the hexagons
           minZoom: 5.0,
           maxZoom: 18.0,
+          // DEV MODE: Tap map to simulate walking and capturing zones
+          onTap: _onMapTap,
         ),
         children: [
           TileLayer(
@@ -246,16 +270,18 @@ class _MapScreenState extends State<MapScreen> {
             userAgentPackageName: 'com.example.app',
           ),
 
-          // Draw the Hexagon Grid Layer
-          if (hexagonBoundary.isNotEmpty)
+          // Draw all captured hexagons
+          if (zoneBoundaries.isNotEmpty)
             PolygonLayer(
               polygons: [
-                Polygon(
-                  points: hexagonBoundary,
-                  color: Colors.green.withValues(alpha: 0.3),
-                  borderColor: Colors.green,
-                  borderStrokeWidth: 2.0,
-                ),
+                // Create a polygon for each captured zone
+                for (final entry in zoneBoundaries.entries)
+                  Polygon(
+                    points: entry.value,
+                    color: Colors.green.withValues(alpha: 0.3),
+                    borderColor: Colors.green,
+                    borderStrokeWidth: 2.0,
+                  ),
               ],
             ),
 
