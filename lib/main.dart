@@ -58,6 +58,19 @@ class _MapScreenState extends State<MapScreen> {
   static const String _capturedZonesKey = 'capturedZones';
   static const String _userScoreKey = 'userScore';
 
+  // ============================================
+  // RPG LEVELING SYSTEM
+  // ============================================
+  /// Calculate player level: 0-4 zones = Lvl 1, 5-9 zones = Lvl 2, etc.
+  int get playerLevel => (capturedZones.length ~/ 5) + 1;
+
+  /// Calculate progress to next level (0.0 to 1.0)
+  /// Example: 2 zones out of 5 = 0.4 progress
+  double get progressToNextLevel {
+    final zonesInCurrentLevel = capturedZones.length % 5;
+    return zonesInCurrentLevel / 5.0;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -370,6 +383,9 @@ class _MapScreenState extends State<MapScreen> {
         '✅ Successfully created hexagon with ${newBoundary.length} points',
       );
 
+      // Check if this will trigger a level up BEFORE adding the zone
+      final currentLevel = playerLevel;
+
       // Add to captured zones and calculate boundaries
       setState(() {
         capturedZones.add(h3IndexStr);
@@ -380,6 +396,16 @@ class _MapScreenState extends State<MapScreen> {
 
       // Save to local storage
       _saveCapturedZonesAndScore();
+
+      // Show visual feedback - SnackBar notification
+      _showZoneCapturedNotification();
+
+      // Check if we leveled up (capturedZones.length now has the new zone)
+      final newLevel = playerLevel;
+      if (newLevel > currentLevel) {
+        // Trigger level-up celebration
+        _showLevelUpCelebration(newLevel);
+      }
 
       debugPrint(
         '🎨 Zone added to trail! Total zones: ${capturedZones.length}',
@@ -400,6 +426,143 @@ class _MapScreenState extends State<MapScreen> {
       );
     } catch (e) {
       debugPrint('❌ Error saving data: $e');
+    }
+  }
+
+  /// Show a cyberpunk-themed SnackBar notification when zone is captured
+  void _showZoneCapturedNotification() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Row(
+          children: [
+            Icon(Icons.check_circle, color: Color(0xFF00FF41), size: 20),
+            SizedBox(width: 12),
+            Text(
+              'ZONE SECURED! +100 SCORE',
+              style: TextStyle(
+                color: Color(0xFF00FF41),
+                fontSize: 14,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 1.0,
+              ),
+            ),
+          ],
+        ),
+        backgroundColor: Colors.black.withValues(alpha: 0.85),
+        duration: const Duration(milliseconds: 2000),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(8),
+          side: const BorderSide(color: Color(0xFF00FF41), width: 1.5),
+        ),
+        margin: const EdgeInsets.all(16),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  /// Show a flashy cyberpunk-terminal style level-up celebration dialog
+  void _showLevelUpCelebration(int newLevel) {
+    debugPrint('🎉 LEVEL UP! New level: $newLevel');
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext context) {
+        return Dialog(
+          backgroundColor: Colors.transparent,
+          elevation: 0,
+          child: Center(
+            child: Container(
+              padding: const EdgeInsets.all(32),
+              decoration: BoxDecoration(
+                color: Colors.black.withValues(alpha: 0.9),
+                border: Border.all(
+                  color: const Color(0xFFFF006E), // Neon magenta
+                  width: 3,
+                ),
+                borderRadius: BorderRadius.circular(16),
+                boxShadow: [
+                  BoxShadow(
+                    color: const Color(0xFFFF006E).withValues(alpha: 0.6),
+                    blurRadius: 24,
+                    spreadRadius: 4,
+                  ),
+                ],
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Flashing title
+                  const Text(
+                    'SYSTEM UPGRADE',
+                    style: TextStyle(
+                      color: Color(0xFFFF006E),
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 2.5,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  // Level display
+                  Text(
+                    'LEVEL $newLevel REACHED!',
+                    style: const TextStyle(
+                      color: Color(0xFF00D9FF),
+                      fontSize: 32,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 2.0,
+                      fontFamily: 'Courier',
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '${newLevel * 5} ZONES CAPTURED',
+                    style: const TextStyle(
+                      color: Color(0xFF00FF41),
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 1.5,
+                    ),
+                  ),
+                  const SizedBox(height: 32),
+                  // Acknowledge button
+                  ElevatedButton(
+                    onPressed: () {
+                      Navigator.of(context).pop();
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFFFF006E),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 32,
+                        vertical: 12,
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
+                    child: const Text(
+                      'ACKNOWLEDGE',
+                      style: TextStyle(
+                        color: Colors.black,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 1.5,
+                        fontSize: 14,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  /// Animate the map camera to center on user location
+  void _centerOnUser() {
+    if (userLocation != null) {
+      mapController.move(userLocation!, 17.0);
+      debugPrint('🎯 Centered map on user location');
     }
   }
 
@@ -552,7 +715,7 @@ class _MapScreenState extends State<MapScreen> {
                   ],
                 ),
 
-              // User location marker
+              // User location marker - Cyberpunk player avatar
               MarkerLayer(
                 markers: [
                   if (userLocation != null)
@@ -560,19 +723,57 @@ class _MapScreenState extends State<MapScreen> {
                       point: userLocation!,
                       width: 80,
                       height: 80,
-                      child: Container(
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF00D9FF).withValues(alpha: 0.3),
-                          shape: BoxShape.circle,
-                          border: Border.all(
-                            color: const Color(0xFF00D9FF),
-                            width: 2,
-                          ),
-                        ),
-                        child: const Icon(
-                          Icons.my_location,
-                          color: Color(0xFF00D9FF),
-                          size: 24,
+                      child: Center(
+                        child: Stack(
+                          alignment: Alignment.center,
+                          children: [
+                            // Pulsing neon ring (semi-transparent outer glow)
+                            Container(
+                              width: 70,
+                              height: 70,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                  color: const Color(
+                                    0xFFFF006E,
+                                  ).withValues(alpha: 0.5),
+                                  width: 2,
+                                ),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: const Color(
+                                      0xFFFF006E,
+                                    ).withValues(alpha: 0.4),
+                                    blurRadius: 12,
+                                    spreadRadius: 2,
+                                  ),
+                                ],
+                              ),
+                            ),
+                            // Inner neon pink/magenta player dot
+                            Container(
+                              width: 36,
+                              height: 36,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: const Color(0xFFFF006E),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: const Color(
+                                      0xFFFF006E,
+                                    ).withValues(alpha: 0.8),
+                                    blurRadius: 16,
+                                    spreadRadius: 3,
+                                  ),
+                                ],
+                              ),
+                              child: const Icon(
+                                Icons.person,
+                                color: Colors.black,
+                                size: 20,
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                     ),
@@ -604,58 +805,127 @@ class _MapScreenState extends State<MapScreen> {
                       ),
                       borderRadius: BorderRadius.circular(12),
                     ),
-                    child: Row(
+                    child: Column(
                       mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        // Score display
-                        Column(
+                        // Top row: Score, Zones, Level
+                        Row(
                           mainAxisSize: MainAxisSize.min,
-                          crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            const Text(
-                              'SCORE',
-                              style: TextStyle(
-                                color: Color(0xFF00FF41),
-                                fontSize: 12,
-                                fontWeight: FontWeight.bold,
-                                letterSpacing: 1.5,
-                              ),
+                            // Score display
+                            Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'SCORE',
+                                  style: TextStyle(
+                                    color: Color(0xFF00FF41),
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                    letterSpacing: 1.5,
+                                  ),
+                                ),
+                                Text(
+                                  userScore.toString().padLeft(5, '0'),
+                                  style: const TextStyle(
+                                    color: Color(0xFF00FF41),
+                                    fontSize: 24,
+                                    fontWeight: FontWeight.bold,
+                                    fontFamily: 'Courier',
+                                    letterSpacing: 1.0,
+                                  ),
+                                ),
+                              ],
                             ),
-                            Text(
-                              userScore.toString().padLeft(5, '0'),
-                              style: const TextStyle(
-                                color: Color(0xFF00FF41),
-                                fontSize: 24,
-                                fontWeight: FontWeight.bold,
-                                fontFamily: 'Courier',
-                                letterSpacing: 1.0,
-                              ),
+                            const SizedBox(width: 32),
+                            // Zones display
+                            Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'ZONES',
+                                  style: TextStyle(
+                                    color: Color(0xFF00D9FF),
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                    letterSpacing: 1.5,
+                                  ),
+                                ),
+                                Text(
+                                  capturedZones.length.toString().padLeft(
+                                    3,
+                                    '0',
+                                  ),
+                                  style: const TextStyle(
+                                    color: Color(0xFF00D9FF),
+                                    fontSize: 24,
+                                    fontWeight: FontWeight.bold,
+                                    fontFamily: 'Courier',
+                                    letterSpacing: 1.0,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(width: 32),
+                            // Level display
+                            Column(
+                              mainAxisSize: MainAxisSize.min,
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'LVL',
+                                  style: TextStyle(
+                                    color: Color(0xFFFF006E),
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                    letterSpacing: 1.5,
+                                  ),
+                                ),
+                                Text(
+                                  playerLevel.toString().padLeft(2, '0'),
+                                  style: const TextStyle(
+                                    color: Color(0xFFFF006E),
+                                    fontSize: 24,
+                                    fontWeight: FontWeight.bold,
+                                    fontFamily: 'Courier',
+                                    letterSpacing: 1.0,
+                                  ),
+                                ),
+                              ],
                             ),
                           ],
                         ),
-                        const SizedBox(width: 32),
-                        // Zones display
+                        const SizedBox(height: 12),
+                        // Progress bar row
                         Column(
-                          mainAxisSize: MainAxisSize.min,
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             const Text(
-                              'ZONES',
+                              'NEXT LEVEL',
                               style: TextStyle(
-                                color: Color(0xFF00D9FF),
-                                fontSize: 12,
+                                color: Colors.grey,
+                                fontSize: 10,
                                 fontWeight: FontWeight.bold,
-                                letterSpacing: 1.5,
+                                letterSpacing: 1.0,
                               ),
                             ),
-                            Text(
-                              capturedZones.length.toString().padLeft(3, '0'),
-                              style: const TextStyle(
-                                color: Color(0xFF00D9FF),
-                                fontSize: 24,
-                                fontWeight: FontWeight.bold,
-                                fontFamily: 'Courier',
-                                letterSpacing: 1.0,
+                            const SizedBox(height: 6),
+                            SizedBox(
+                              width: 220,
+                              height: 8,
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(4),
+                                child: LinearProgressIndicator(
+                                  value: progressToNextLevel,
+                                  backgroundColor: Colors.grey.shade800,
+                                  valueColor:
+                                      const AlwaysStoppedAnimation<Color>(
+                                        Color(0xFFFF006E), // Neon magenta
+                                      ),
+                                ),
                               ),
                             ),
                           ],
@@ -669,6 +939,36 @@ class _MapScreenState extends State<MapScreen> {
           ),
         ],
       ),
+      // ============================================
+      // "CENTER ON ME" FAB - Camera Control
+      // ============================================
+      floatingActionButton: userLocation != null
+          ? FloatingActionButton(
+              onPressed: _centerOnUser,
+              backgroundColor: Colors.black.withValues(alpha: 0.7),
+              materialTapTargetSize: MaterialTapTargetSize.padded,
+              child: Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  border: Border.all(color: const Color(0xFF00D9FF), width: 2),
+                  boxShadow: [
+                    BoxShadow(
+                      color: const Color(0xFF00D9FF).withValues(alpha: 0.6),
+                      blurRadius: 12,
+                      spreadRadius: 1,
+                    ),
+                  ],
+                ),
+                child: const Icon(
+                  Icons.my_location,
+                  color: Color(0xFF00D9FF),
+                  size: 24,
+                ),
+              ),
+            )
+          : null,
+      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
     );
   }
 
