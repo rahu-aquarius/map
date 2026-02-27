@@ -6,6 +6,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:js' as js;
 import 'dart:ui' as ui;
+import 'dart:math' show Random;
 
 void main() {
   runApp(const MyApp());
@@ -71,6 +72,12 @@ class _MapScreenState extends State<MapScreen> {
     return zonesInCurrentLevel / 5.0;
   }
 
+  // ============================================
+  // LOOT SYSTEM - Neon Data Caches
+  // ============================================
+  List<LatLng> activeCaches = []; // Stores active loot cache locations
+  static const int bonusPointsPerCache = 500; // Bonus for capturing a cache
+
   @override
   void initState() {
     super.initState();
@@ -120,6 +127,13 @@ class _MapScreenState extends State<MapScreen> {
       debugPrint('⏳ [STEP 6] Requesting location permission...');
       await _requestLocationPermissionStrict();
       debugPrint('✅ [STEP 6] Location permission complete');
+
+      // STEP 6B: Spawn initial loot caches if user location is available
+      if (userLocation != null && activeCaches.isEmpty) {
+        debugPrint('⏳ [STEP 6B] Spawning initial loot caches...');
+        _spawnCaches(userLocation!);
+        debugPrint('✅ [STEP 6B] ${activeCaches.length} loot caches spawned');
+      }
 
       // STEP 7: ONLY NOW set isLoading = false so the map renders
       // This ensures all zones are already calculated and in memory
@@ -352,6 +366,42 @@ class _MapScreenState extends State<MapScreen> {
 
       final h3IndexStr = h3Index.toString();
 
+      // ============================================
+      // LOOT CAPTURE Check (before zone check)
+      // ============================================
+      // Check if player stepped on any active caches
+      for (int i = 0; i < activeCaches.length; i++) {
+        final cache = activeCaches[i];
+        final cacheH3Index = h3Lib.callMethod('latLngToCell', [
+          cache.latitude,
+          cache.longitude,
+          10,
+        ]);
+
+        if (cacheH3Index.toString() == h3IndexStr) {
+          debugPrint(
+            '💎 CACHE CAPTURED at: ${cache.latitude}, ${cache.longitude}',
+          );
+          // Remove captured cache
+          setState(() {
+            activeCaches.removeAt(i);
+            userScore += bonusPointsPerCache;
+          });
+          // Save updated score
+          _saveCapturedZonesAndScore();
+          // Show golden notification
+          _showCacheCapturNotification();
+          debugPrint('💰 Bonus points added! Score: $userScore');
+
+          // Replenish caches if all captured
+          if (activeCaches.isEmpty) {
+            debugPrint('🎯 All caches captured! Spawning new ones...');
+            _spawnCaches(location);
+          }
+          return; // Don't process zone capture on cache tile
+        }
+      }
+
       // Check if we've already captured this zone
       if (capturedZones.contains(h3IndexStr)) {
         debugPrint('⚠️  Zone $h3IndexStr already captured!');
@@ -558,6 +608,69 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
+  /// Spawn 3 random loot caches within 300-500 meters of center point
+  void _spawnCaches(LatLng center) {
+    try {
+      final random = Random();
+      activeCaches.clear();
+
+      // Generate 3 random cache locations
+      // 1 degree latitude ≈ 111 km, so:
+      // 300m ≈ 0.0027 degrees, 500m ≈ 0.0045 degrees
+      for (int i = 0; i < 3; i++) {
+        // Random offset between 0.0027 and 0.005 degrees (~300-550m)
+        final latOffset = 0.0027 + (random.nextDouble() * 0.0023);
+        final lngOffset = 0.0027 + (random.nextDouble() * 0.0023);
+
+        // Randomly choose direction (positive or negative)
+        final latSign = random.nextBool() ? 1 : -1;
+        final lngSign = random.nextBool() ? 1 : -1;
+
+        final cacheLat = center.latitude + (latOffset * latSign);
+        final cacheLng = center.longitude + (lngOffset * lngSign);
+
+        activeCaches.add(LatLng(cacheLat, cacheLng));
+        debugPrint('💾 Loot Cache $i spawned at: $cacheLat, $cacheLng');
+      }
+
+      setState(() {});
+      debugPrint('✨ Spawned ${activeCaches.length} neon data caches');
+    } catch (e) {
+      debugPrint('❌ Error spawning caches: $e');
+    }
+  }
+
+  /// Show SnackBar when a loot cache is captured
+  void _showCacheCapturNotification() {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Row(
+          children: [
+            Icon(Icons.diamond, color: Color(0xFFFFD700), size: 20),
+            SizedBox(width: 12),
+            Text(
+              'NEON CACHE SECURED! +500 RARE BONUS',
+              style: TextStyle(
+                color: Color(0xFFFFD700),
+                fontSize: 14,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 1.0,
+              ),
+            ),
+          ],
+        ),
+        backgroundColor: Colors.black.withValues(alpha: 0.85),
+        duration: const Duration(milliseconds: 3000),
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(8),
+          side: const BorderSide(color: Color(0xFFFFD700), width: 2),
+        ),
+        margin: const EdgeInsets.all(16),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
   /// Animate the map camera to center on user location
   void _centerOnUser() {
     if (userLocation != null) {
@@ -711,6 +824,72 @@ class _MapScreenState extends State<MapScreen> {
                         color: const Color(0xFF00D9FF).withValues(alpha: 0.2),
                         borderColor: const Color(0xFF00D9FF),
                         borderStrokeWidth: 3.0,
+                      ),
+                  ],
+                ),
+
+              // Neon data cache markers - Glowing yellow loot
+              if (activeCaches.isNotEmpty)
+                MarkerLayer(
+                  markers: [
+                    for (final cache in activeCaches)
+                      Marker(
+                        point: cache,
+                        width: 60,
+                        height: 60,
+                        child: Center(
+                          child: Stack(
+                            alignment: Alignment.center,
+                            children: [
+                              // Outer glowing ring (semi-transparent)
+                              Container(
+                                width: 60,
+                                height: 60,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  border: Border.all(
+                                    color: const Color(
+                                      0xFFFFD700,
+                                    ).withValues(alpha: 0.6),
+                                    width: 2,
+                                  ),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: const Color(
+                                        0xFFFFD700,
+                                      ).withValues(alpha: 0.5),
+                                      blurRadius: 16,
+                                      spreadRadius: 3,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              // Inner golden diamond icon
+                              Container(
+                                width: 40,
+                                height: 40,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: const Color(0xFFFFD700),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: const Color(
+                                        0xFFFFD700,
+                                      ).withValues(alpha: 0.9),
+                                      blurRadius: 20,
+                                      spreadRadius: 4,
+                                    ),
+                                  ],
+                                ),
+                                child: const Icon(
+                                  Icons.diamond,
+                                  color: Colors.black87,
+                                  size: 22,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
                   ],
                 ),
